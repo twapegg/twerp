@@ -1,0 +1,26 @@
+# Dependencies and build output
+node_modules/
+dist/
+*.tsbuildinfo
+*.local
+
+# Secrets: every .env except the committed examples
+.env
+.env.*
+!.env.example
+!.env.local.example
+supabase/.env
+
+# Personal data snapshots and one-off data fixes (already applied to the cloud DB)
+supabase/cloud/seed_data.sql
+supabase/scripts/20*.sql
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*

@@ -1,0 +1,704 @@
+{
+  "name": "ledger-chat-confirm",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ledger-chat-confirm",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "259907cc-4858-4f5b-81cb-cf2727c9e14b",
+      "name": "Webhook",
+      "webhookId": "f9969c65-e220-476f-b99a-23781e98b356"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "7cc82bea-7e6f-41fd-8431-3a2db6e56ddd",
+              "leftValue": "={{ $('Webhook').item.json.body.decision }}",
+              "rightValue": "confirm",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        880,
+        0
+      ],
+      "id": "fdfe97d2-4b6c-4abc-bfe1-9a83fd522cdc",
+      "name": "Is confirm?"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "update pending_actions set status = 'cancelled' where id = $1 and status = 'pending' returning id, kind",
+        "options": {
+          "queryReplacement": "={{ $('Webhook').item.json.body.pendingActionId }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1100,
+        160
+      ],
+      "id": "90f0bc58-68a7-4e43-82ce-b4664cbf3c41",
+      "name": "Cancel pending action"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all()\nconst status = rows.length ? 'cancelled' : 'already_handled_or_not_found'\nreturn [{ json: { status } }]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        160
+      ],
+      "id": "4cbb8f24-95a4-4790-acec-67b28eb2e4aa",
+      "name": "Shape cancel result"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1540,
+        160
+      ],
+      "id": "4806fdaf-8bbb-421c-9805-449e74cd1782",
+      "name": "Respond (cancel)"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "update pending_actions set status = 'confirmed', confirmed_at = now() where id = $1 and status = 'pending' and expires_at > now() returning id, kind, payload",
+        "options": {
+          "queryReplacement": "={{ $('Webhook').item.json.body.pendingActionId }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1100,
+        -160
+      ],
+      "id": "2ef42411-2fcf-491f-a681-7da193273318",
+      "name": "Atomically claim pending action"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all()\nif (!rows.length) return [{ json: { route: 'expired_or_not_found' } }]\nconst row = rows[0].json\nreturn [{ json: { route: row.kind, id: row.id, payload: row.payload } }]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        -160
+      ],
+      "id": "5d9b7fc2-87de-48f2-89a7-563f039bf356",
+      "name": "Normalize claim result"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "f5adbedd-69f2-4b41-bc59-b6e750f0efae",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "add_transaction",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "add_transaction"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "c8447a26-b508-4bec-8bb2-fdb19a3493cb",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "update_budget",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "update_budget"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "db6dfb61-d1ca-4b53-bbdd-ef831479675e",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "delete_transaction",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "delete_transaction"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1540,
+        -160
+      ],
+      "id": "e9577233-ad74-4854-8166-300b140d1cd2",
+      "name": "Route by kind"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into transactions (account_id, category_id, amount, note, occurred_at, is_recurring) values ($1::uuid, $2::uuid, $3::numeric, $4, $5::date, false) returning id",
+        "options": {
+          "queryReplacement": "={{ [ $json.payload.account_id, $json.payload.category_id, $json.payload.amount, $json.payload.note, $json.payload.occurred_at ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1760,
+        -320
+      ],
+      "id": "ab36285e-76e9-4dfb-a39a-45130026c7b1",
+      "name": "Insert transaction"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "update pending_actions set result = jsonb_build_object('row_id', $1) where id = $2",
+        "options": {
+          "queryReplacement": "={{ [ $json.id, $('Normalize claim result').item.json.id ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1980,
+        -320
+      ],
+      "id": "5b115892-f691-44c4-92f4-54f35e9b20b0",
+      "name": "Record add result"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2200,
+        -320
+      ],
+      "id": "dd781234-5501-4cb9-842c-fe7c0e14658d",
+      "name": "Respond (add confirmed)"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "update budgets set limit_amount = $1::numeric where id = $2::uuid returning id",
+        "options": {
+          "queryReplacement": "={{ [ $json.payload.new_limit_amount, $json.payload.budget_id ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1760,
+        -160
+      ],
+      "id": "12efcfe4-44f6-449f-a893-6422dbd9e2ba",
+      "name": "Update budget limit"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "update pending_actions set result = jsonb_build_object('row_id', $1) where id = $2",
+        "options": {
+          "queryReplacement": "={{ [ $json.id, $('Normalize claim result').item.json.id ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1980,
+        -160
+      ],
+      "id": "70fe0382-1fc4-4ea5-9a6b-97468ca8290f",
+      "name": "Record budget result"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2200,
+        -160
+      ],
+      "id": "220eee50-2724-4b97-910c-8605e9b0e2c4",
+      "name": "Respond (budget confirmed)"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "update transactions set deleted_at = now() where id = $1::uuid and deleted_at is null returning id",
+        "options": {
+          "queryReplacement": "={{ $json.payload.transaction_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1760,
+        0
+      ],
+      "id": "51ac9614-771b-4aba-8f7e-840d0c320463",
+      "name": "Soft delete transaction"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "update pending_actions set result = jsonb_build_object('row_id', $1) where id = $2",
+        "options": {
+          "queryReplacement": "={{ [ $json.id, $('Normalize claim result').item.json.id ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1980,
+        0
+      ],
+      "id": "460aa65b-0d62-4c31-80b0-be50b3173568",
+      "name": "Record delete result"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2200,
+        0
+      ],
+      "id": "bb1a7330-cd25-488e-86b6-ef9752793db0",
+      "name": "Respond (delete confirmed)"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { status: 'expired_or_already_handled' } }]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        160
+      ],
+      "id": "2b49669b-da4d-4a24-819e-aabc81e45f36",
+      "name": "Shape expired result"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1980,
+        160
+      ],
+      "id": "e3d1d82f-44e5-4c5f-93ab-f0ee7ca7beb0",
+      "name": "Respond (expired)"
+    },
+    {
+      "parameters": {
+        "url": "https://sjnkzjevexkdecpkvfap.supabase.co/auth/v1/user",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNqbmt6amV2ZXhrZGVjcGt2ZmFwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk2MjY3NzgsImV4cCI6MjEwNTIwMjc3OH0.muox8ocyDcPya5BsnhhOXdP1iE_jWINkWO1Q4cMITZY"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ $json.headers.authorization || '' }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "verify-session-0001",
+      "name": "Verify session",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ],
+      "notes": "Asks Supabase Auth who the bearer token belongs to. Anything but 200 means the caller is not a signed-in user of this app."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "session-status-200",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 200,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "session-has-user",
+              "leftValue": "={{ $json.body.id || \"\" }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "session-ok-0001",
+      "name": "Session ok?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"error\":\"unauthorized\"}",
+        "options": {
+          "responseCode": 401
+        }
+      },
+      "id": "respond-401-0001",
+      "name": "Respond 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        660,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is confirm?": {
+      "main": [
+        [
+          {
+            "node": "Atomically claim pending action",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cancel pending action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cancel pending action": {
+      "main": [
+        [
+          {
+            "node": "Shape cancel result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape cancel result": {
+      "main": [
+        [
+          {
+            "node": "Respond (cancel)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Atomically claim pending action": {
+      "main": [
+        [
+          {
+            "node": "Normalize claim result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize claim result": {
+      "main": [
+        [
+          {
+            "node": "Route by kind",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by kind": {
+      "main": [
+        [
+          {
+            "node": "Insert transaction",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update budget limit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Soft delete transaction",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Shape expired result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert transaction": {
+      "main": [
+        [
+          {
+            "node": "Record add result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record add result": {
+      "main": [
+        [
+          {
+            "node": "Respond (add confirmed)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update budget limit": {
+      "main": [
+        [
+          {
+            "node": "Record budget result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record budget result": {
+      "main": [
+        [
+          {
+            "node": "Respond (budget confirmed)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Soft delete transaction": {
+      "main": [
+        [
+          {
+            "node": "Record delete result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record delete result": {
+      "main": [
+        [
+          {
+            "node": "Respond (delete confirmed)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape expired result": {
+      "main": [
+        [
+          {
+            "node": "Respond (expired)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify session": {
+      "main": [
+        [
+          {
+            "node": "Session ok?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Session ok?": {
+      "main": [
+        [
+          {
+            "node": "Is confirm?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

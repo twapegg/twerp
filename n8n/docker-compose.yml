@@ -1,0 +1,32 @@
+name: ledger-n8n
+
+# Local n8n instance for authoring/testing the chat-assistant workflows
+# (ledger-chat, ledger-chat-confirm) before handing the exported JSON to the
+# user's real VPS n8n instance. Joins the Supabase stack's existing network
+# so n8n's Postgres node can reach `db:5432` by container name directly.
+
+services:
+  n8n:
+    container_name: ledger-n8n
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      N8N_SECURE_COOKIE: "false"
+      GENERIC_TIMEZONE: UTC
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./workflows:/workflows:ro
+    networks:
+      default:
+        aliases:
+          - n8n
+
+networks:
+  default:
+    name: ledger-supabase_default
+    external: true
+
+volumes:
+  n8n-data:

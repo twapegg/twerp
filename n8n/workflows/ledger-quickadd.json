@@ -1,0 +1,282 @@
+{
+  "name": "ledger-quickadd",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ledger-quickadd",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "e3bb0494-01fe-47a4-9ba5-12e04a4cc892"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the model prompt as plain text. Curly braces are stripped because the\n// agent node runs the prompt through a template where { } mean variables.\nconst b = $('Webhook').first().json.body\nconst clean = (v) => String(v ?? '').replace(/[{}]/g, '')\nconst lines = [\n  'Today: ' + clean(b.today),\n  'Default account id: ' + clean(b.defaultAccountId),\n  'Accounts (id | name):',\n  ...(b.accounts || []).map(a => '  ' + clean(a.id) + ' | ' + clean(a.name)),\n  'Categories (id | name):',\n  ...(b.categories || []).map(c => '  ' + clean(c.id) + ' | ' + clean(c.name)),\n  'Text: ' + clean(b.text),\n]\nreturn [{ json: { prompt: lines.join('\\n') } }]\n"
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000006",
+      "name": "Build prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        860,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.prompt }}",
+        "options": {
+          "systemMessage": "You turn one line of casual text about money into a single JSON transaction for a personal ledger. Reply with ONLY a JSON object, no prose, no code fences, with keys: accountId (string, one of the provided account ids), categoryId (string, one of the provided category ids), amount (number; NEGATIVE for spending, positive only when money was clearly received), note (short clean label like \"McDonald's\" or \"Grab to work\", never the whole sentence), occurredAt (YYYY-MM-DD; use today unless the text names a date like 'yesterday' or 'sept 3'), confidence (\"high\" or \"low\"; low when the category is a guess or the amount is unclear), explanation (one short sentence saying which category/account you picked and why). Choose the best-fitting category from the list; if nothing fits use the one named 'Running Budget'. Use the default account unless the text names another account (e.g. 'on BPI', 'gcash'). Amounts are Philippine pesos; strip currency words and commas. If there is genuinely no amount, return a JSON object whose only key is error with the value no amount found.",
+          "maxIterations": 1
+        }
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000002",
+      "name": "Parse with model",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1100,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "model": "anthropic/claude-haiku-4.5",
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000003",
+      "name": "OpenRouter Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the model's JSON (tolerating stray code fences) and validate ids against what the app sent.\nconst body = $('Webhook').item.json.body\nconst raw = String($input.first().json.output ?? '')\nconst cleaned = raw.replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```$/, '').trim()\nlet parsed\ntry {\n  parsed = JSON.parse(cleaned)\n} catch (e) {\n  const m = cleaned.match(/\\{[\\s\\S]*\\}/)\n  if (!m) return [{ json: { ok: false, error: 'Model did not return JSON', raw } }]\n  try { parsed = JSON.parse(m[0]) } catch { return [{ json: { ok: false, error: 'Model returned malformed JSON', raw } }] }\n}\nif (parsed.error) return [{ json: { ok: false, error: String(parsed.error) } }]\n\nconst accountIds = new Set((body.accounts || []).map(a => a.id))\nconst categoryIds = new Set((body.categories || []).map(c => c.id))\nconst amount = Number(parsed.amount)\nif (!Number.isFinite(amount) || amount === 0) return [{ json: { ok: false, error: 'Could not work out the amount' } }]\nconst accountId = accountIds.has(parsed.accountId) ? parsed.accountId : body.defaultAccountId\nconst fallbackCategory = (body.categories || []).find(c => /running budget/i.test(c.name))\nconst categoryId = categoryIds.has(parsed.categoryId) ? parsed.categoryId : (fallbackCategory && fallbackCategory.id)\nif (!categoryId) return [{ json: { ok: false, error: 'No usable category' } }]\nconst occurredAt = /^\\d{4}-\\d{2}-\\d{2}$/.test(String(parsed.occurredAt)) ? parsed.occurredAt : body.today\n\nreturn [{ json: {\n  ok: true,\n  transaction: { accountId, categoryId, amount, note: String(parsed.note || body.text).slice(0, 120), occurredAt },\n  confidence: parsed.confidence === 'low' ? 'low' : 'high',\n  explanation: String(parsed.explanation || ''),\n} }]\n"
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000004",
+      "name": "Validate & shape",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1420,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000005",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://sjnkzjevexkdecpkvfap.supabase.co/auth/v1/user",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNqbmt6amV2ZXhrZGVjcGt2ZmFwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk2MjY3NzgsImV4cCI6MjEwNTIwMjc3OH0.muox8ocyDcPya5BsnhhOXdP1iE_jWINkWO1Q4cMITZY"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ $json.headers.authorization || '' }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "verify-session-0001",
+      "name": "Verify session",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ],
+      "notes": "Asks Supabase Auth who the bearer token belongs to. Anything but 200 means the caller is not a signed-in user of this app."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "session-status-200",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 200,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "session-has-user",
+              "leftValue": "={{ $json.body.id || \"\" }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "session-ok-0001",
+      "name": "Session ok?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"error\":\"unauthorized\"}",
+        "options": {
+          "responseCode": 401
+        }
+      },
+      "id": "respond-401-0001",
+      "name": "Respond 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        660,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build prompt": {
+      "main": [
+        [
+          {
+            "node": "Parse with model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Parse with model",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse with model": {
+      "main": [
+        [
+          {
+            "node": "Validate & shape",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & shape": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify session": {
+      "main": [
+        [
+          {
+            "node": "Session ok?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Session ok?": {
+      "main": [
+        [
+          {
+            "node": "Build prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,511 @@
+{
+  "name": "ledger-chat",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ledger-chat",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "6fb8c582-24ba-413e-b893-8f604042e0a1",
+      "name": "Webhook",
+      "webhookId": "088a6695-c480-43f7-bd6e-f8920d033a13"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with ins as (\n  insert into chat_messages (session_id, role, content) values ($1, 'user', $2) returning id\n), m as (\n  select date_trunc('month', (now() at time zone 'Asia/Manila'))::date as start\n), hist as (\n  select role, content, created_at from chat_messages\n  where session_id = $1\n  order by created_at desc limit 20\n), recent as (\n  select t.id, t.occurred_at, t.amount, t.note, c.name as category, a.name as account\n  from transactions t\n  join categories c on c.id = t.category_id\n  join accounts a on a.id = t.account_id\n  where t.deleted_at is null\n  order by t.occurred_at desc, t.created_at desc\n  limit 50\n), spend as (\n  select t.category_id, sum(-t.amount) as spent\n  from transactions t, m\n  where t.deleted_at is null and t.amount < 0 and t.occurred_at >= m.start\n  group by t.category_id\n)\nselect\n  (select json_agg(json_build_object('role', role, 'content', content) order by created_at asc) from hist) as history,\n  (select json_agg(json_build_object('id', id, 'name', name, 'kind', kind) order by name) from accounts) as accounts,\n  (select json_agg(json_build_object('id', id, 'name', name, 'kind', kind) order by name) from categories) as categories,\n  (select json_agg(json_build_object('id', b.id, 'category', c.name, 'kind', c.kind, 'limit', b.limit_amount,\n                                     'spent', coalesce(s.spent, 0)) order by c.kind, c.name)\n     from budgets b join categories c on c.id = b.category_id left join spend s on s.category_id = b.category_id) as budgets,\n  (select monthly_amount from income limit 1) as income,\n  (select json_agg(json_build_object('id', id, 'name', name, 'balance', balance, 'original', original_amount,\n                                     'payment', monthly_payment, 'rate', interest_rate, 'due_day', due_day) order by balance desc)\n     from debts) as debts,\n  (select json_agg(json_build_object('id', id, 'date', occurred_at, 'amount', amount, 'category', category,\n                                     'account', account, 'note', note) order by occurred_at desc) from recent) as transactions,\n  (select coalesce(sum(amount), 0) from transactions t, m where t.deleted_at is null and t.amount > 0 and t.occurred_at >= m.start) as month_income,\n  (select coalesce(sum(-amount), 0) from transactions t, m where t.deleted_at is null and t.amount < 0 and t.occurred_at >= m.start) as month_spent",
+        "options": {
+          "queryReplacement": "={{ [ $('Webhook').item.json.body.sessionId, $('Webhook').item.json.body.message ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        880,
+        0
+      ],
+      "id": "e6a236df-5fb5-46ff-85de-abac5519bb05",
+      "name": "Store message & load context"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $('Webhook').item.json.body\nconst sessionId = body.sessionId\nconst message = body.message\nconst ctx = $input.first().json\nconst parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v) ?? []\nconst num = (n) => Number(n ?? 0)\nconst peso = (n) => '₱' + num(n).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })\nconst today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' })\n\nconst history = parse(ctx.history).filter(h => h && h.role)\n// The new message was stored in the same query that loaded history; keep it out of \"so far\".\nif (history.length && history[history.length - 1].role === 'user' && history[history.length - 1].content === message) history.pop()\nconst historyText = history.map(h => `${h.role === 'user' ? 'User' : 'Twerp'}: ${h.content}`).join('\\n')\n\nconst L = []\nL.push(`Today is ${today}. All amounts are Philippine pesos.`)\nL.push(`Monthly paycheck (income table): ${ctx.income == null ? 'not set' : peso(ctx.income)}.`)\nL.push(`This month so far: ${peso(ctx.month_income)} in, ${peso(ctx.month_spent)} out.`)\nL.push('')\nL.push('ACCOUNTS (id | name | kind)')\nfor (const a of parse(ctx.accounts)) L.push(`${a.id} | ${a.name} | ${a.kind}`)\nL.push('')\nL.push('CATEGORIES (id | name | kind)')\nfor (const c of parse(ctx.categories)) L.push(`${c.id} | ${c.name} | ${c.kind}`)\nL.push('')\nL.push('BUDGETS (budget id | category | kind | monthly limit | spent this month) - expense = fixed bill, savings = savings target')\nfor (const b of parse(ctx.budgets)) L.push(`${b.id} | ${b.category} | ${b.kind} | ${peso(b.limit)} | ${peso(b.spent)}`)\nL.push('')\nL.push('DEBTS (id | name | still owed | borrowed | payment per month | rate % per year | due day)')\nconst debts = parse(ctx.debts)\nif (!debts.length) L.push('none')\nfor (const d of debts) L.push(`${d.id} | ${d.name} | ${peso(d.balance)} | ${peso(d.original)} | ${peso(d.payment)} | ${num(d.rate)} | ${d.due_day ?? '-'}`)\nL.push('')\nL.push('RECENT TRANSACTIONS, newest first, last 50 (id | date | amount, negative = spending | category | account | note)')\nfor (const t of parse(ctx.transactions)) L.push(`${t.id} | ${t.date} | ${num(t.amount)} | ${t.category} | ${t.account} | ${t.note ?? ''}`)\nL.push('')\nL.push(historyText ? `CONVERSATION SO FAR\\n${historyText}` : 'This is the start of the conversation.')\nL.push('')\nL.push(`USER'S NEW MESSAGE\\n${message}`)\n\n// The Agent node runs prompt text through a template where braces are variables.\nconst prompt = L.join('\\n').replace(/[{}]/g, '')\nreturn [{ json: { sessionId, message, today, prompt } }]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        0
+      ],
+      "id": "950002c7-22cb-4603-82e8-00c180d3e9e4",
+      "name": "Build prompt"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.prompt }}",
+        "options": {
+          "systemMessage": "You are Twerp, the resident money nag inside Ledger, a personal budgeting app used by exactly one person: the user you are talking to. You are the friend who is good with money, not a customer-service bot.\n\nHow you talk:\n- Like a person in a chat. Short paragraphs, plain words, contractions. Most replies are two to six sentences. Go longer only when the user asks for a full breakdown.\n- Blunt. If a spending pattern is dumb, say it's dumb and say why. Tease and roast a little, but you're on the user's side: the point is that they end the month with more money, not that they feel bad. Don't mock things they can't change, like their income.\n- One opinion, not a menu. If there's an obvious next move, say what you'd do and ask if they want you to propose it. Don't list three options and ask them to pick.\n- No corporate filler. Never say things like \"Here's a snapshot\", \"My take\", \"Suggestions\", \"just say the word\", \"Want me to\", or \"I hope this helps\". Don't summarise what you just said. Don't re-introduce yourself mid-conversation. No emoji.\n- Formatting: the chat window is narrow. No markdown tables, no headers, no bold-label lists. Plain sentences, and a short bullet list only when you're listing more than three things. Bold at most one or two key numbers per reply.\n- Money is pesos. Write amounts as ₱ with thousands separators and round to whole pesos unless the cents matter.\n\nEvery message arrives with a fresh snapshot of the user's data: paycheck, this month's totals, accounts, categories, budgets with this month's spend, debts, and the 50 most recent transactions, all with ids. Answer from the snapshot. Only call search_transactions when the question needs older transactions than the snapshot holds. Use the ids from the snapshot when you propose a change.\n\nWhat the data means: accounts; categories, each with a kind (expense budgets are the monthly fixed bills, savings budgets are savings targets); transactions (negative amounts are spending, positive are income); budgets; the monthly paycheck in income; and debts (installments and loans with a remaining balance, monthly payment, interest rate and due day). Installments like the laptop, mouse or Zuitt live in debts. They are planned, not surprises, so don't call them one-off shocks; do point out how much of the paycheck they eat. When the user asks how they're doing, what they owe is part of the answer.\n\nUse the \"Today is\" date in the prompt to decide what \"this month\" means. The prompt includes the conversation so far; don't repeat things you already said.\n\nHard rules about changing data: you have no tool that can insert, update or delete anything directly. The only way you can cause a change is to call one of the propose_* tools, which records a proposal the user reviews in the chat and does not execute anything. After calling a propose tool, say in plain language exactly what you proposed and that they have to hit Confirm in the chat for it to happen. Never say a change is done. If the user asks for several changes, call the relevant propose tool once per change. Only call propose_delete_transaction when one specific transaction is unambiguously identified; if more than one could match, ask first. Never invent account, category, budget or transaction ids; take them from the snapshot, or from search_transactions for older entries."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1320,
+        0
+      ],
+      "id": "e28d0e3c-6004-42ae-a306-b55962ee2050",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": "anthropic/claude-sonnet-5",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        1180,
+        220
+      ],
+      "id": "c7c46c8c-ad01-415b-ab44-f4ff92e96785",
+      "name": "OpenRouter Chat Model"
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Returns up to 300 non-deleted transactions, newest first, with category and account names (id, occurred_at, amount, category, account, note). Only needed for transactions older than the 50 already in the snapshot.",
+        "operation": "executeQuery",
+        "query": "select t.id, t.occurred_at, t.amount, c.name as category, a.name as account, t.note from transactions t join categories c on c.id = t.category_id join accounts a on a.id = t.account_id where t.deleted_at is null order by t.occurred_at desc, t.created_at desc limit 300",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.6,
+      "position": [
+        1320,
+        380
+      ],
+      "id": "dac78f99-ae38-49a5-bef5-cb0f1cb18647",
+      "name": "search_transactions"
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Proposes adding a new transaction. Does NOT insert the transaction - only records a proposal the user must confirm in the chat UI. Call get_accounts/get_categories first to resolve real ids. Amount should be negative for an expense, positive for income.",
+        "operation": "executeQuery",
+        "query": "insert into pending_actions (session_id, kind, payload, summary) values ($1, 'add_transaction', jsonb_build_object('account_id', $2::uuid, 'category_id', $3::uuid, 'amount', $4::numeric, 'note', $5, 'occurred_at', $6::date), $7) returning id",
+        "options": {
+          "queryReplacement": "={{ [ $('Build prompt').item.json.sessionId, $fromAI('account_id', 'The uuid of the account this transaction belongs to, looked up via get_accounts', 'string'), $fromAI('category_id', 'The uuid of the category this transaction belongs to, looked up via get_categories', 'string'), $fromAI('amount', 'The transaction amount - negative for an expense, positive for income', 'number'), $fromAI('note', 'A short note describing the transaction', 'string'), $fromAI('occurred_at', 'The date the transaction occurred, as YYYY-MM-DD', 'string'), $fromAI('summary', 'A one-sentence human-readable summary of what will be added, for display in a confirmation card', 'string') ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.6,
+      "position": [
+        1460,
+        380
+      ],
+      "id": "a2878008-e5b6-45ce-aa3e-9571c153248f",
+      "name": "propose_add_transaction"
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Proposes changing a budget limit. Does NOT change it - only records a proposal the user must confirm in the chat UI. Call get_budgets first to resolve the real budget id.",
+        "operation": "executeQuery",
+        "query": "insert into pending_actions (session_id, kind, payload, summary) values ($1, 'update_budget', jsonb_build_object('budget_id', $2::uuid, 'new_limit_amount', $3::numeric), $4) returning id",
+        "options": {
+          "queryReplacement": "={{ [ $('Build prompt').item.json.sessionId, $fromAI('budget_id', 'The uuid of the budget to change, looked up via get_budgets', 'string'), $fromAI('new_limit_amount', 'The new monthly limit amount', 'number'), $fromAI('summary', 'A one-sentence human-readable summary of the proposed change, for display in a confirmation card', 'string') ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.6,
+      "position": [
+        1620,
+        380
+      ],
+      "id": "32fceb5c-ac83-4cce-9fd2-53a4a701fe38",
+      "name": "propose_update_budget"
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Proposes deleting a transaction. Does NOT delete it - only records a proposal the user must confirm in the chat UI. Only use this when a specific transaction is unambiguously identified via get_recent_transactions.",
+        "operation": "executeQuery",
+        "query": "insert into pending_actions (session_id, kind, payload, summary) values ($1, 'delete_transaction', jsonb_build_object('transaction_id', $2::uuid), $3) returning id",
+        "options": {
+          "queryReplacement": "={{ [ $('Build prompt').item.json.sessionId, $fromAI('transaction_id', 'The uuid of the transaction to delete, looked up via get_recent_transactions', 'string'), $fromAI('summary', 'A one-sentence human-readable summary of what will be deleted, for display in a confirmation card', 'string') ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.6,
+      "position": [
+        1780,
+        380
+      ],
+      "id": "a7090bd1-5e56-4d7e-89ed-ec4711bf406e",
+      "name": "propose_delete_transaction"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into chat_messages (session_id, role, content) values ($1, 'assistant', $2) returning id",
+        "options": {
+          "queryReplacement": "={{ [ $('Build prompt').item.json.sessionId, $('AI Agent').item.json.output ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2200,
+        0
+      ],
+      "id": "291d99e8-b1f5-436d-9614-3b07d9d02465",
+      "name": "Insert assistant message"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "update pending_actions set chat_message_id = $1 where session_id = $2 and chat_message_id is null and status = 'pending' returning id, kind, summary",
+        "options": {
+          "queryReplacement": "={{ [ $json.id, $('Build prompt').item.json.sessionId ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2420,
+        0
+      ],
+      "id": "c8f53b94-12ed-441c-a4a1-f342751cb664",
+      "name": "Attach pending actions to message",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const reply = $('AI Agent').item.json.output ?? ''\n// A query that matches no rows still yields one empty item; don't turn it into a blank card.\nconst pendingActions = $input.all()\n  .map(i => i.json)\n  .filter(j => j && j.id)\n  .map(j => ({ id: j.id, kind: j.kind, summary: j.summary }))\nreturn [{ json: { reply, pendingActions } }]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        0
+      ],
+      "id": "cfd9a1ad-d1b7-4e14-93d5-6174de7a43ec",
+      "name": "Shape response"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1980,
+        0
+      ],
+      "id": "5b8fe9f9-ae3f-49de-89d5-a953049bebf8",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select id, kind, summary from pending_actions where session_id = $1 and chat_message_id is null and status = 'pending' order by created_at",
+        "options": {
+          "queryReplacement": "={{ [ $('Build prompt').item.json.sessionId ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1540,
+        0
+      ],
+      "id": "afd6f9bd-853b-4946-88a0-e85bc2540bba",
+      "name": "Load new proposals",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "url": "https://sjnkzjevexkdecpkvfap.supabase.co/auth/v1/user",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNqbmt6amV2ZXhrZGVjcGt2ZmFwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk2MjY3NzgsImV4cCI6MjEwNTIwMjc3OH0.muox8ocyDcPya5BsnhhOXdP1iE_jWINkWO1Q4cMITZY"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ $json.headers.authorization || '' }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "verify-session-0001",
+      "name": "Verify session",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ],
+      "notes": "Asks Supabase Auth who the bearer token belongs to. Anything but 200 means the caller is not a signed-in user of this app."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "session-status-200",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 200,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "session-has-user",
+              "leftValue": "={{ $json.body.id || \"\" }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "session-ok-0001",
+      "name": "Session ok?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"error\":\"unauthorized\"}",
+        "options": {
+          "responseCode": 401
+        }
+      },
+      "id": "respond-401-0001",
+      "name": "Respond 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        660,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store message & load context": {
+      "main": [
+        [
+          {
+            "node": "Build prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build prompt": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "search_transactions": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "propose_add_transaction": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "propose_update_budget": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "propose_delete_transaction": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Load new proposals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load new proposals": {
+      "main": [
+        [
+          {
+            "node": "Shape response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond to Webhook": {
+      "main": [
+        [
+          {
+            "node": "Insert assistant message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert assistant message": {
+      "main": [
+        [
+          {
+            "node": "Attach pending actions to message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify session": {
+      "main": [
+        [
+          {
+            "node": "Session ok?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Session ok?": {
+      "main": [
+        [
+          {
+            "node": "Store message & load context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
